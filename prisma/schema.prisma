@@ -1,0 +1,1161 @@
+// ============================================================================
+// DIVINE SACCO MANAGEMENT SYSTEM — PRISMA SCHEMA
+// Single source of truth: docs/DEVELOPER_GUIDE.md (§4 data strategy)
+// Portability rules (SQLite dev / PostgreSQL / MySQL 8 prod):
+//   - No enums (String + zod validation at the boundary)
+//   - No Decimal: ALL money = Int minor units (cents); rates = Int basis points
+//   - Ids = cuid() strings; JSON where structured data is needed
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================ AUTH & SECURITY
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  phone              String?
+  name               String
+  passwordHash       String
+  role               String    @default("ADMIN") // SUPER_ADMIN | ADMIN | MEMBER
+  designation        String? // MANAGER|TELLER|LOAN_OFFICER|ACCOUNTANT|COMPLIANCE|RECEPTION
+  permissions        Json? // per-user overrides: ["+key","-key"]
+  status             String    @default("ACTIVE") // ACTIVE|SUSPENDED|DISABLED
+  mustChangePassword Boolean   @default(false)
+  failedAttempts     Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  avatarFileId       String?
+  createdById        String?
+  updatedById        String?
+  deletedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  memberProfile      MemberProfile?
+  staffProfile       StaffProfile?
+  tellerSessions     TellerSession[]
+  notifications      Notification[]
+  auditLogs          AuditLog[]        @relation("AuditActor")
+  impersonationsMade ImpersonationLog[] @relation("Impersonator")
+  impersonationsTaken ImpersonationLog[] @relation("Impersonated")
+}
+
+model ImpersonationLog {
+  id            String    @id @default(cuid())
+  superAdminId  String
+  targetUserId  String
+  reason        String
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  superAdmin    User      @relation("Impersonator", fields: [superAdminId], references: [id])
+  target        User      @relation("Impersonated", fields: [targetUserId], references: [id])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  userRole  String?
+  action    String // e.g. MEMBER_CREATE
+  module    String
+  entity    String
+  entityId  String?
+  before    Json?
+  after     Json?
+  ip        String?
+  userAgent String?
+  severity  String    @default("info") // info|warn|critical
+  createdAt DateTime @default(now())
+  user      User?    @relation("AuditActor", fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([module, createdAt])
+  @@index([entity, entityId])
+}
+
+model PermissionAssignment {
+  id            String   @id @default(cuid())
+  designation   String // MANAGER|TELLER|LOAN_OFFICER|ACCOUNTANT|COMPLIANCE|RECEPTION
+  permissionKey String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([designation, permissionKey])
+}
+
+// ============================================================ MEMBERS (M1)
+
+model MemberProfile {
+  id               String    @id @default(cuid())
+  userId           String?   @unique
+  memberNumber     String    @unique
+  firstName        String
+  middleName       String?
+  lastName         String
+  gender           String
+  dateOfBirth      DateTime
+  nationalId       String    @unique
+  passportNo       String?
+  kraPin           String?
+  photoFileId      String?
+  phone            String
+  altPhone         String?
+  email            String?
+  physicalAddress  String
+  town             String?
+  county           String?
+  maritalStatus    String?
+  occupation       String?
+  employerName     String?
+  monthlyIncomeCents Int     @default(0)
+  status           String    @default("PENDING") // PENDING|ACTIVE|SUSPENDED|BLACKLISTED|EXITED
+  joinedAt         DateTime  @default(now())
+  exitAt           DateTime?
+  exitReason       String?
+  kycVerified      Boolean   @default(false)
+  kycVerifiedAt    DateTime?
+  verifiedById     String?
+  blacklistReason  String?
+  notes            String?
+  createdById      String?
+  updatedById      String?
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user               User?                @relation(fields: [userId], references: [id])
+  nextOfKins         NextOfKin[]
+  beneficiaries      Beneficiary[]
+  savingsAccounts    SavingsAccount[]
+  savingsTransactions SavingsTransaction[]
+  loanApplications   LoanApplication[]
+  loans              Loan[]
+  guarantorships     Guarantor[]
+  shareTransactions  ShareTransaction[]
+  sharePosition      MemberSharePosition?
+  dividendEntries    DividendEntry[]
+  standingOrders     StandingOrder[]
+  tellerTransactions TellerTransaction[]
+  statementRequests  StatementRequest[]
+  paymentTransactions PaymentTransaction[]
+
+  @@index([status])
+  @@index([lastName, firstName])
+  @@index([phone])
+}
+
+model NextOfKin {
+  id             String   @id @default(cuid())
+  memberProfileId String
+  name           String
+  relationship   String
+  phone          String
+  email          String?
+  idNumber       String?
+  dateOfBirth    DateTime?
+  percentage     Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  memberProfile  MemberProfile @relation(fields: [memberProfileId], references: [id], onDelete: Cascade)
+
+  @@index([memberProfileId])
+}
+
+model Beneficiary {
+  id             String   @id @default(cuid())
+  memberProfileId String
+  name           String
+  relationship   String
+  phone          String?
+  idNumber       String?
+  dateOfBirth    DateTime?
+  allocationPct  Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  memberProfile  MemberProfile @relation(fields: [memberProfileId], references: [id], onDelete: Cascade)
+
+  @@index([memberProfileId])
+}
+
+model MembershipApplication {
+  id                 String   @id @default(cuid())
+  applicationNumber  String   @unique
+  source             String   @default("WEB") // WEB|ADMIN
+  firstName          String
+  middleName         String?
+  lastName           String
+  gender             String
+  dateOfBirth        DateTime
+  nationalId         String
+  passportNo         String?
+  kraPin             String?
+  phone              String
+  email              String?
+  physicalAddress    String
+  town               String?
+  county             String?
+  occupation         String?
+  employerName       String?
+  monthlyIncomeCents Int      @default(0)
+  nextOfKins         Json // [{name,relationship,phone,email,idNumber}]
+  productsInterested Json? // [{type,code}]
+  status             String   @default("SUBMITTED") // SUBMITTED|UNDER_REVIEW|APPROVED|REJECTED
+  reviewNotes        String?
+  reviewedById       String?
+  reviewedAt         DateTime?
+  agreedTermsVersion String?
+  createdById        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([status])
+  @@index([nationalId])
+}
+
+model Subscriber {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?
+  phone         String?
+  source        String    @default("WEB_FOOTER")
+  status        String    @default("ACTIVE") // ACTIVE|UNSUBSCRIBED
+  subscribedAt  DateTime  @default(now())
+  unsubscribedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([status])
+}
+
+// ============================================================ SAVINGS (M2)
+
+model SavingsProduct {
+  id                   String   @id @default(cuid())
+  code                 String   @unique
+  name                 String
+  description          String?
+  type                 String   @default("REGULAR") // REGULAR|FIXED|HOLIDAY|CHRISTMAS|JUNIOR|TARGET
+  isDefault            Boolean  @default(false)
+  interestRateBps      Int      @default(0)
+  minBalanceCents      Int      @default(0)
+  monthlyFeeCents      Int      @default(0)
+  minOpeningCents      Int      @default(0)
+  withdrawalPolicy     String   @default("FREE") // FREE|LOCKED_UNTIL_MATURITY|PENALTY|APPROVAL_REQUIRED
+  withdrawalPenaltyBps Int      @default(0)
+  lockInMonths         Int      @default(0)
+  ageMaxForJunior      Int?
+  maturityTermsMonths  Int?
+  isPublic             Boolean  @default(true)
+  sortOrder            Int      @default(0)
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  accounts SavingsAccount[]
+}
+
+model SavingsAccount {
+  id                   String    @id @default(cuid())
+  accountNumber        String    @unique
+  memberProfileId      String
+  productId            String
+  name                 String?
+  balanceCents         Int       @default(0)
+  interestEarnedCents  Int       @default(0)
+  heldFundsCents       Int       @default(0)
+  status               String    @default("OPEN") // OPEN|FROZEN|DORMANT|CLOSED
+  targetCents          Int?
+  maturityDate         DateTime?
+  autoRenew            Boolean   @default(false)
+  openedAt             DateTime  @default(now())
+  closedAt             DateTime?
+  lastActivityAt       DateTime  @default(now())
+  createdById          String?
+  updatedById          String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  memberProfile   MemberProfile       @relation(fields: [memberProfileId], references: [id])
+  product         SavingsProduct      @relation(fields: [productId], references: [id])
+  transactions    SavingsTransaction[]
+  standingOrdersFrom StandingOrder[]  @relation("FromAccount")
+  standingOrdersTo   StandingOrder[]  @relation("ToAccount")
+  tellerTransactions TellerTransaction[]
+  paymentTransactions PaymentTransaction[]
+
+  @@index([memberProfileId])
+  @@index([status])
+}
+
+model SavingsTransaction {
+  id                   String    @id @default(cuid())
+  reference            String    @unique
+  accountId            String
+  memberProfileId      String
+  type                 String // DEPOSIT|WITHDRAWAL|FEE|INTEREST|TRANSFER_IN|TRANSFER_OUT|ADJUSTMENT|REVERSAL
+  channel              String // COUNTER|MPESA|BANK|STANDING_ORDER|INTERNAL|INTEREST_POSTING|PAYROLL|PORTAL|DIVIDEND_CREDIT
+  amountCents          Int
+  balanceAfterCents    Int
+  valueDate            DateTime  @default(now())
+  narration            String?
+  externalRef          String?
+  linkedTransactionId  String?
+  journalEntryId       String?
+  status               String    @default("COMPLETED") // COMPLETED|PENDING_CLEARING|REVERSED
+  performedById        String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  account          SavingsAccount     @relation(fields: [accountId], references: [id])
+  memberProfile    MemberProfile      @relation(fields: [memberProfileId], references: [id])
+
+  @@unique([externalRef, type])
+  @@index([accountId, valueDate])
+  @@index([memberProfileId])
+  @@index([type, channel])
+}
+
+model StandingOrder {
+  id                String   @id @default(cuid())
+  memberProfileId   String
+  fromAccountId     String
+  destinationType   String   @default("INTERNAL") // INTERNAL|EXTERNAL_BANK
+  toAccountId       String?
+  bankInstruction   String?
+  amountCents       Int
+  frequency         String   @default("MONTHLY")
+  dayOfMonth        Int      @default(1)
+  nextRunAt         DateTime
+  active            Boolean  @default(true)
+  consecutiveFailures Int   @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  memberProfile  MemberProfile   @relation(fields: [memberProfileId], references: [id])
+  fromAccount    SavingsAccount  @relation("FromAccount", fields: [fromAccountId], references: [id])
+  toAccount      SavingsAccount? @relation("ToAccount", fields: [toAccountId], references: [id])
+}
+
+// ============================================================ LOANS (M3)
+
+model LoanProduct {
+  id                  String   @id @default(cuid())
+  code                String   @unique
+  name                String
+  description         String?
+  interestMethod      String   @default("REDUCING") // REDUCING|FLAT
+  interestRateBps     Int      @default(1200)
+  penaltyPerDayBps    Int      @default(50)
+  termMinMonths       Int      @default(6)
+  termMaxMonths       Int      @default(36)
+  minAmountCents      Int      @default(50000)
+  maxAmountCents      Int      @default(5000000)
+  savingsMultiplier   Int      @default(3)
+  processingFeeBps    Int      @default(200)
+  insuranceFeeBps     Int      @default(100)
+  requiredGuarantors  Int      @default(2)
+  guaranteeCoveragePct Int     @default(20)
+  gracePeriodDays     Int      @default(0)
+  allowTopUp          Boolean  @default(false)
+  securityOptions     Json?
+  isPublic            Boolean  @default(true)
+  active              Boolean  @default(true)
+  sortOrder           Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  applications LoanApplication[]
+  loans       Loan[]
+}
+
+model LoanApplication {
+  id                  String    @id @default(cuid())
+  applicationNumber   String    @unique
+  memberProfileId     String
+  productId           String
+  requestedAmountCents Int
+  approvedAmountCents Int?
+  termMonths          Int
+  purpose             String?
+  requestedBy         String    @default("MEMBER") // MEMBER|ADMIN_ON_BEHALF
+  submittedById       String?
+  status              String    @default("SUBMITTED") // DRAFT|SUBMITTED|GUARANTOR_PENDING|VETTING|APPROVED|REJECTED|DISBURSED|CANCELLED
+  scoreCard           Json?
+  approvalTrail       Json?
+  decisionNotes       String?
+  rejectionReason     String?
+  appliedAt           DateTime  @default(now())
+  decidedAt           DateTime?
+  decidedById         String?
+  createdById         String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  memberProfile  MemberProfile @relation(fields: [memberProfileId], references: [id])
+  product        LoanProduct   @relation(fields: [productId], references: [id])
+  guarantors     Guarantor[]
+  loan           Loan?
+
+  @@index([status])
+  @@index([memberProfileId])
+}
+
+model Guarantor {
+  id                 String    @id @default(cuid())
+  applicationId      String
+  guarantorMemberId  String
+  guaranteedAmountCents Int
+  status             String    @default("PENDING") // PENDING|ACCEPTED|DECLINED|EXPIRED|MANUAL_RECORDED
+  method             String    @default("PORTAL_LINK") // PORTAL_LINK|SMS_LINK|MANUAL
+  consentRef         String?
+  respondedAt        DateTime?
+  expiresAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  application     LoanApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  guarantorMember MemberProfile   @relation(fields: [guarantorMemberId], references: [id])
+
+  @@index([guarantorMemberId, status])
+  @@index([applicationId])
+}
+
+model Loan {
+  id                  String    @id @default(cuid())
+  loanNumber          String    @unique
+  applicationId       String    @unique
+  memberProfileId     String
+  productId           String
+  principalCents      Int
+  feesChargedCents    Int       @default(0)
+  netDisbursedCents   Int
+  interestMethod      String
+  interestRateBps     Int
+  termMonths          Int
+  outstandingCents    Int
+  penaltyAccruedCents Int       @default(0)
+  penaltyComputedThrough DateTime?
+  status              String    @default("ACTIVE") // ACTIVE|OVERDUE|DEFAULTED|CLOSED|WRITTEN_OFF
+  disbursedAt         DateTime
+  disbursementChannel String // COUNTER|MPESA|BANK|PESAPAL
+  disbursementRef     String?
+  firstDueAt          DateTime
+  nextDueAt           DateTime?
+  closedAt            DateTime?
+  writeOffReason      String?
+  restructuredFromId  String?
+  disbursedById       String?
+  createdById         String?
+  updatedById         String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  application    LoanApplication  @relation(fields: [applicationId], references: [id])
+  memberProfile  MemberProfile    @relation(fields: [memberProfileId], references: [id])
+  product        LoanProduct      @relation(fields: [productId], references: [id])
+  schedule       RepaymentSchedule[]
+  repayments     LoanRepayment[]
+  actions        LoanAction[]
+
+  @@index([status])
+  @@index([memberProfileId])
+}
+
+model RepaymentSchedule {
+  id                 String    @id @default(cuid())
+  loanId             String
+  installmentNo      Int
+  dueDate            DateTime
+  principalDueCents  Int
+  interestDueCents   Int
+  penaltyDueCents    Int       @default(0)
+  totalDueCents      Int
+  paidCents          Int       @default(0)
+  status             String    @default("PENDING") // PENDING|PARTIAL|PAID|WAIVED
+  paidAt             DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  loan Loan @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  @@unique([loanId, installmentNo])
+  @@index([dueDate, status])
+}
+
+model LoanRepayment {
+  id                  String    @id @default(cuid())
+  reference           String    @unique
+  loanId              String
+  amountCents         Int
+  channel             String // PORTAL|MPESA|COUNTER|PAYROLL|PESAPAL
+  allocation          Json?
+  externalRef         String?
+  savingsTransactionId String?
+  paymentTransactionId String?
+  receivedById        String?
+  valueDate           DateTime  @default(now())
+  journalEntryId      String?
+  status              String    @default("COMPLETED") // COMPLETED|REVERSED
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  loan Loan @relation(fields: [loanId], references: [id])
+
+  @@unique([externalRef, channel])
+  @@index([loanId])
+}
+
+model LoanAction {
+  id            String   @id @default(cuid())
+  loanId        String
+  type          String // RESCHEDULE|ROLLOVER|WAIVER|WRITE_OFF
+  before        Json?
+  after         Json?
+  reason        String
+  performedById String?
+  createdAt     DateTime @default(now())
+
+  loan Loan @relation(fields: [loanId], references: [id])
+}
+
+// ============================================================ SHARES & DIVIDENDS (M4)
+
+model ShareTransaction {
+  id                   String   @id @default(cuid())
+  certificateRef       String?
+  memberProfileId      String
+  type                 String // PURCHASE|TRANSFER_IN|TRANSFER_OUT|REFUND|BONUS
+  quantity             Int
+  unitPriceCents       Int
+  amountCents          Int
+  feeCents             Int      @default(0)
+  counterpartyMemberId String?
+  channel              String   @default("ADMIN") // COUNTER|SAVINGS|MPESA|ADMIN|PORTAL
+  narration            String?
+  journalEntryId       String?
+  performedById        String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  memberProfile MemberProfile @relation(fields: [memberProfileId], references: [id])
+
+  @@index([memberProfileId])
+  @@index([type, createdAt])
+}
+
+model MemberSharePosition {
+  id              String    @id @default(cuid())
+  memberProfileId String    @unique
+  totalShares     Int       @default(0)
+  totalValueCents Int       @default(0)
+  lastDividendAt  DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  memberProfile MemberProfile @relation(fields: [memberProfileId], references: [id])
+}
+
+model DividendRun {
+  id                  String    @id @default(cuid())
+  year                Int
+  method              String    @default("PROPORTIONAL_SHARES") // PROPORTIONAL_SHARES|SAVINGS_WEIGHTED|HYBRID
+  totalPoolCents      Int       @default(0)
+  depositInterestBps  Int       @default(0)
+  status              String    @default("DRAFT") // DRAFT|CALCULATED|APPROVED|PAID
+  computedAt          DateTime?
+  approvedById        String?
+  approvedAt          DateTime?
+  paidAt              DateTime?
+  createdById         String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  entries DividendEntry[]
+
+  @@unique([year])
+}
+
+model DividendEntry {
+  id                   String    @id @default(cuid())
+  runId                String
+  memberProfileId      String
+  sharesHeld           Int       @default(0)
+  avgSavingsCents      Int       @default(0)
+  shareDividendCents   Int       @default(0)
+  depositInterestCents Int       @default(0)
+  totalPayoutCents     Int       @default(0)
+  payoutChannel        String    @default("SAVINGS_CREDIT") // SAVINGS_CREDIT|MPESA_B2C|BANK
+  payoutRef            String?
+  paidAt               DateTime?
+  journalEntryId       String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  run           DividendRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  memberProfile MemberProfile @relation(fields: [memberProfileId], references: [id])
+
+  @@unique([runId, memberProfileId])
+}
+
+// ============================================================ FOSA (M5)
+
+model TellerSession {
+  id                 String    @id @default(cuid())
+  user               User      @relation(fields: [userId], references: [id])
+  userId             String
+  status             String    @default("OPEN") // OPEN|CLOSED
+  openingFloatCents  Int       @default(0)
+  countedCashCents   Int?
+  expectedCashCents  Int?
+  varianceCents      Int?
+  openedAt           DateTime  @default(now())
+  closedAt           DateTime?
+  notes              String?
+  createdById        String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  transactions TellerTransaction[]
+
+  @@index([userId, status])
+}
+
+model TellerTransaction {
+  id                  String    @id @default(cuid())
+  receiptNo           String    @unique
+  sessionId           String
+  type                String // CASH_DEPOSIT|CASH_WITHDRAWAL|CHEQUE_DEPOSIT|TRANSFER|LOAN_REPAYMENT|SHARE_PURCHASE
+  memberProfileId     String?
+  accountId           String?
+  loanId              String?
+  amountCents         Int
+  chequeBank          String?
+  chequeNo            String?
+  chequeImageFileId   String?
+  status              String    @default("POSTED") // POSTED|PENDING_CLEARING|CLEARED|BOUNCED|REVERSED
+  savingsTransactionId String?
+  loanRepaymentId     String?
+  shareTransactionId  String?
+  narration           String?
+  performedById       String?
+  journalEntryId      String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  session       TellerSession   @relation(fields: [sessionId], references: [id])
+  account       SavingsAccount? @relation(fields: [accountId], references: [id])
+  memberProfile MemberProfile?  @relation(fields: [memberProfileId], references: [id])
+}
+
+model StatementRequest {
+  id            String    @id @default(cuid())
+  memberProfileId String
+  accountId     String?
+  type          String    @default("FULL") // MINI|FULL|GL
+  periodFrom    DateTime
+  periodTo      DateTime
+  format        String    @default("PDF") // PDF|CSV|PRINT
+  requestedById String?
+  generatedAt   DateTime?
+  fileId        String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  memberProfile MemberProfile @relation(fields: [memberProfileId], references: [id])
+}
+
+// ============================================================ ACCOUNTING (M6)
+
+model GlAccount {
+  id               String   @id @default(cuid())
+  code             String   @unique
+  name             String
+  type             String // ASSET|LIABILITY|EQUITY|INCOME|EXPENSE
+  parentId         String?
+  isPostable       Boolean  @default(true)
+  active           Boolean  @default(true)
+  cachedBalanceCents Int   @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  parent   GlAccount?    @relation("GlTree", fields: [parentId], references: [id])
+  children GlAccount[]   @relation("GlTree")
+  lines    JournalLine[]
+  banks    BankAccount[]
+}
+
+model JournalEntry {
+  id              String    @id @default(cuid())
+  entryNo         String    @unique
+  date            DateTime
+  memo            String
+  source          String    @default("MANUAL") // MANUAL|SAVINGS|LOANS|FEES|FOSA|MPESA|PAYROLL|DIVIDEND|WRITEOFF|SHARES|EXPENSE|RECON
+  sourceRef       String?
+  status          String    @default("POSTED") // POSTED|REVERSED
+  reversedEntryId String?
+  postedById      String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  lines JournalLine[]
+}
+
+model JournalLine {
+  id             String   @id @default(cuid())
+  journalEntryId String
+  glAccountId    String
+  debitCents     Int      @default(0)
+  creditCents    Int      @default(0)
+  narration      String?
+
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  glAccount    GlAccount    @relation(fields: [glAccountId], references: [id])
+
+  @@index([glAccountId])
+  @@index([journalEntryId])
+}
+
+model Vendor {
+  id        String    @id @default(cuid())
+  name      String
+  category  String?
+  phone     String?
+  email     String?
+  kraPin    String?
+  notes     String?
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  expenses Expense[]
+
+  @@index([name])
+}
+
+model Expense {
+  id              String    @id @default(cuid())
+  vendorId        String?
+  glAccountId     String
+  description     String
+  amountCents     Int
+  billDate        DateTime
+  dueDate         DateTime?
+  status          String    @default("DRAFT") // DRAFT|APPROVED|PAID|CANCELLED
+  paidAt          DateTime?
+  paidVia         String? // BANK|CASH|MPESA
+  paymentRef      String?
+  approvedById    String?
+  attachmentFileId String?
+  journalEntryId  String?
+  createdById     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  vendor Vendor? @relation(fields: [vendorId], references: [id])
+
+  @@index([status])
+}
+
+model BankAccount {
+  id                  String   @id @default(cuid())
+  name                String
+  bankName            String
+  accountNumber       String
+  branch              String?
+  glAccountId         String
+  openingBalanceCents Int      @default(0)
+  active              Boolean  @default(true)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  glAccount     GlAccount            @relation(fields: [glAccountId], references: [id])
+  statementLines BankStatementLine[]
+  reconciliations BankReconciliation[]
+}
+
+model BankStatementLine {
+  id                   String    @id @default(cuid())
+  bankAccountId        String
+  batchId              String
+  statementDate        DateTime
+  valueDate            DateTime
+  description          String
+  ref                  String?
+  amountCents          Int // signed
+  status               String    @default("UNRECONCILED") // UNRECONCILED|MATCHED|RECONCILED
+  matchedJournalLineId String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
+
+  @@index([bankAccountId, statementDate])
+  @@index([status])
+}
+
+model BankReconciliation {
+  id                  String    @id @default(cuid())
+  bankAccountId       String
+  periodFrom          DateTime
+  periodTo            DateTime
+  statementBalanceCents Int    @default(0)
+  systemBalanceCents  Int      @default(0)
+  differenceCents     Int      @default(0)
+  status              String    @default("DRAFT") // DRAFT|REVIEWED|APPROVED
+  performedById       String?
+  approvedById        String?
+  approvedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
+}
+
+// ============================================================ DIGITAL CHANNELS (M7)
+
+model IntegrationCredential {
+  id            String    @id @default(cuid())
+  provider      String    @unique // MPESA_DARAJA|PESAPAL|SMTP|SMS_GATEWAY|SOCIAL
+  config        Json? // ENCRYPTED at rest
+  environment   String    @default("SANDBOX") // SANDBOX|PRODUCTION
+  status        String    @default("PENDING") // PENDING|CONNECTED|ERROR
+  demoMode      Boolean   @default(false)
+  lastCheckedAt DateTime?
+  lastError     String?
+  updatedById   String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model PaymentTransaction {
+  id               String    @id @default(cuid())
+  requestRef       String    @unique
+  provider         String // MPESA|PESAPAL
+  type             String // C2B|STK_PUSH|B2C|PESAPAL_ORDER
+  purpose          String // SAVINGS_DEPOSIT|LOAN_REPAYMENT|LOAN_DISBURSEMENT|DIVIDEND_PAYOUT|SHARE_PURCHASE|UNALLOCATED
+  memberProfileId  String?
+  accountId        String?
+  loanId           String?
+  amountCents      Int
+  phone            String?
+  status           String    @default("INITIATED") // INITIATED|PENDING|SUCCESS|SUCCESS_UNPOSTED|FAILED|TIMEOUT|CANCELLED
+  statusHistory    Json?
+  providerRef      String?
+  mpesaReceipt     String?
+  callbackPayload  Json?
+  narration        String?
+  completedAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  memberProfile MemberProfile? @relation(fields: [memberProfileId], references: [id])
+  account       SavingsAccount? @relation(fields: [accountId], references: [id])
+
+  @@unique([mpesaReceipt])
+  @@index([status, createdAt])
+  @@index([purpose])
+}
+
+model WebhookEvent {
+  id             String    @id @default(cuid())
+  provider       String
+  eventType      String?
+  payload        Json?
+  signatureValid Boolean   @default(false)
+  processed      Boolean   @default(false)
+  error          String?
+  receivedAt     DateTime  @default(now())
+  processedAt    DateTime?
+}
+
+// ============================================================ REPORTING & BI (M8)
+
+model ReportRun {
+  id             String    @id @default(cuid())
+  definitionCode String    @default("SASRA_Q")
+  periodLabel    String
+  periodFrom     DateTime
+  periodTo       DateTime
+  figures        Json?
+  fileId         String?
+  status         String    @default("GENERATED") // GENERATED|SUBMITTED
+  generatedById  String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([definitionCode, periodLabel])
+}
+
+model KpiSnapshot {
+  id         String   @id @default(cuid())
+  metricKey  String
+  asOf       DateTime
+  valueJson  Json?
+  createdAt  DateTime @default(now())
+
+  @@unique([metricKey, asOf])
+}
+
+// ============================================================ COMMUNICATIONS (M9)
+
+model MessageTemplate {
+  id            String    @id @default(cuid())
+  code          String
+  channel       String    @default("EMAIL") // EMAIL|SMS
+  subject       String?
+  body          String
+  placeholders  Json?
+  category      String    @default("GENERAL") // LOAN|SAVING|MEMBER|DIVIDEND|OTP|MEETING|GENERAL
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([code, channel])
+}
+
+model ContactGroup {
+  id            String    @id @default(cuid())
+  name          String
+  description   String?
+  source        String    @default("CUSTOM_CSV") // SUBSCRIBERS|ACTIVE_MEMBERS|LOAN_DUE|MEMBERS_WITH_SAVINGS|SHAREHOLDERS|CUSTOM_CSV
+  filter        Json?
+  materializedContacts Json?
+  createdById   String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model MessageLog {
+  id              String    @id @default(cuid())
+  channel         String    @default("EMAIL") // EMAIL|SMS|BOTH
+  templateId      String?
+  subject         String?
+  bodyRendered    String
+  recipientsCount Int       @default(0)
+  status          String    @default("QUEUED") // QUEUED|SENT|PARTIAL|FAILED
+  sentById        String?
+  providerRef     String?
+  sentAt          DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  recipients MessageRecipient[]
+}
+
+model MessageRecipient {
+  id          String    @id @default(cuid())
+  messageLogId String
+  contactName String
+  phone       String?
+  email       String?
+  status      String    @default("PENDING") // PENDING|SENT|FAILED
+  error       String?
+  sentAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  messageLog MessageLog @relation(fields: [messageLogId], references: [id], onDelete: Cascade)
+}
+
+model OtpCode {
+  id          String    @id @default(cuid())
+  destination String
+  purpose     String    @default("OTP")
+  codeHash    String
+  expiresAt   DateTime
+  attempts    Int       @default(0)
+  consumedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([destination, purpose])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  body      String
+  type      String    @default("INFO") // INFO|LOAN|SAVING|SECURITY|DIVIDEND
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+// ============================================================ HR & PAYROLL (M10)
+
+model StaffProfile {
+  id                String    @id @default(cuid())
+  userId            String    @unique
+  staffNo           String    @unique
+  department        String?
+  designation       String
+  employmentDate    DateTime  @default(now())
+  grossSalaryCents  Int       @default(0)
+  basicSalaryCents  Int       @default(0)
+  allowances        Json?
+  deductions        Json?
+  nextOfKin         Json?
+  photoFileId       String?
+  status            String    @default("ACTIVE") // ACTIVE|SUSPENDED|EXITED
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  user        User              @relation(fields: [userId], references: [id])
+  attendance  AttendanceRecord[]
+  leaveRequests LeaveRequest[]
+  payrollEntries PayrollEntry[]
+}
+
+model AttendanceRecord {
+  id              String    @id @default(cuid())
+  staffProfileId  String
+  date            DateTime
+  checkIn         DateTime?
+  checkOut        DateTime?
+  status          String    @default("PRESENT") // PRESENT|LATE|ABSENT|LEAVE
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  staffProfile StaffProfile @relation(fields: [staffProfileId], references: [id])
+
+  @@unique([staffProfileId, date])
+}
+
+model LeaveRequest {
+  id             String    @id @default(cuid())
+  staffProfileId String
+  type           String    @default("ANNUAL") // ANNUAL|SICK|UNPAID|MATERNITY|PATERNITY|COMPASSIONATE
+  fromDate       DateTime
+  toDate         DateTime
+  days           Int
+  reason         String?
+  status         String    @default("PENDING") // PENDING|APPROVED|REJECTED
+  decidedById    String?
+  decidedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  staffProfile StaffProfile @relation(fields: [staffProfileId], references: [id])
+}
+
+model PayrollRun {
+  id                  String    @id @default(cuid())
+  period              String    @unique // YYYY-MM
+  status              String    @default("DRAFT") // DRAFT|APPROVED|PAID
+  payDate             DateTime?
+  totalGrossCents     Int       @default(0)
+  totalDeductionsCents Int      @default(0)
+  totalNetCents       Int       @default(0)
+  journalEntryId      String?
+  processedById       String?
+  approvedById        String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  entries PayrollEntry[]
+}
+
+model PayrollEntry {
+  id             String    @id @default(cuid())
+  runId          String
+  staffProfileId String
+  basicCents     Int       @default(0)
+  allowances     Json?
+  grossCents     Int       @default(0)
+  deductions     Json? // {paye,nssf,shif,loan,other}
+  netCents       Int       @default(0)
+  payslipFileId  String?
+  paidVia        String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  run          PayrollRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  staffProfile StaffProfile @relation(fields: [staffProfileId], references: [id])
+}
+
+// ============================================================ PLATFORM (M12)
+
+model SiteConfig {
+  id          String    @id @default(cuid())
+  key         String    @unique // entity|features|limits|glMap|payroll|shares|website|seo|cache
+  value       Json?
+  updatedById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model PageContent {
+  id          String    @id @default(cuid())
+  page        String    @default("home")
+  section     String // hero|about|stats|why|products|media|testimonials|cta
+  sortOrder   Int       @default(0)
+  visible     Boolean   @default(true)
+  title       String
+  subtitle    String?
+  body        String?
+  imageFileId String?
+  videoUrl    String?
+  ctaLabel    String?
+  ctaHref     String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([page, section])
+}
+
+model Theme {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?
+  isDarkReady Boolean   @default(true)
+  tokens      Json
+  active      Boolean   @default(false)
+  system      Boolean   @default(false)
+  createdById String?
+  updatedById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Letterhead {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  design      Json
+  active      Boolean   @default(false)
+  system      Boolean   @default(false)
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model FileRecord {
+  id            String    @id @default(cuid())
+  moduleName    String    @default("GENERAL")
+  recordId      String?
+  originalName  String
+  storedName    String?
+  externalUrl   String?
+  mime          String
+  size          Int       @default(0)
+  originalSize  Int       @default(0)
+  compressed    Boolean   @default(false)
+  width         Int?
+  height        Int?
+  source        String    @default("UPLOAD") // UPLOAD|URL_IMPORT
+  uploadedById  String?
+  createdAt     DateTime  @default(now())
+
+  @@index([moduleName, createdAt])
+  @@index([createdAt])
+}
